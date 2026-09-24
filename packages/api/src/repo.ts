@@ -53,6 +53,23 @@ export interface ReplyRow {
   created_at: number;
 }
 
+export interface SnippetRow {
+  id: string;
+  doc_id: string;
+  quote: string;
+  anchor_idx: number;
+  status: 'anchored' | 'lost';
+  author: string;
+  title: string;
+  created_at: number;
+}
+
+export interface RefEdgeRow {
+  snippet_id: string;
+  ref_doc_id: string;
+  created_at: number;
+}
+
 const now = (): number => Date.now();
 
 export const repo = {
@@ -299,5 +316,78 @@ export const repo = {
       'INSERT INTO comment_replies(id,comment_id,author,body,created_at) VALUES($1,$2,$3,$4,$5)',
       [r.id, r.comment_id, r.author, r.body, r.created_at],
     );
+  },
+
+  // ---- cross-document live references ----
+  async insertSnippet(s: SnippetRow): Promise<void> {
+    await pool.query(
+      `INSERT INTO ref_snippets(id,doc_id,quote,anchor_idx,status,author,title,created_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [s.id, s.doc_id, s.quote, s.anchor_idx, s.status, s.author, s.title, s.created_at],
+    );
+  },
+  async getSnippet(id: string): Promise<SnippetRow | null> {
+    const r = await pool.query<SnippetRow>(
+      'SELECT id,doc_id,quote,anchor_idx,status,author,title,created_at FROM ref_snippets WHERE id=$1',
+      [id],
+    );
+    return r.rows[0] ?? null;
+  },
+  async listSnippets(docId: string): Promise<SnippetRow[]> {
+    const r = await pool.query<SnippetRow>(
+      `SELECT id,doc_id,quote,anchor_idx,status,author,title,created_at
+       FROM ref_snippets WHERE doc_id=$1 ORDER BY created_at`,
+      [docId],
+    );
+    return r.rows;
+  },
+  async getSnippets(ids: string[]): Promise<SnippetRow[]> {
+    if (ids.length === 0) return [];
+    const r = await pool.query<SnippetRow>(
+      `SELECT id,doc_id,quote,anchor_idx,status,author,title,created_at
+       FROM ref_snippets WHERE id = ANY($1)`,
+      [ids],
+    );
+    return r.rows;
+  },
+  async updateSnippetAnchor(
+    id: string,
+    quote: string,
+    anchorIdx: number,
+    status: 'anchored' | 'lost',
+  ): Promise<void> {
+    await pool.query(
+      'UPDATE ref_snippets SET quote=$2,anchor_idx=$3,status=$4 WHERE id=$1',
+      [id, quote, anchorIdx, status],
+    );
+  },
+
+  async insertRefEdge(snippetId: string, refDocId: string): Promise<boolean> {
+    const r = await pool.query(
+      `INSERT INTO ref_edges(snippet_id,ref_doc_id,created_at) VALUES($1,$2,$3)
+       ON CONFLICT DO NOTHING`,
+      [snippetId, refDocId, now()],
+    );
+    return (r.rowCount ?? 0) > 0;
+  },
+  async listAllRefEdges(): Promise<RefEdgeRow[]> {
+    const r = await pool.query<RefEdgeRow>(
+      'SELECT snippet_id,ref_doc_id,created_at FROM ref_edges',
+    );
+    return r.rows;
+  },
+  async listEdgesBySnippet(snippetId: string): Promise<RefEdgeRow[]> {
+    const r = await pool.query<RefEdgeRow>(
+      'SELECT snippet_id,ref_doc_id,created_at FROM ref_edges WHERE snippet_id=$1',
+      [snippetId],
+    );
+    return r.rows;
+  },
+  async listEdgesByRefDoc(refDocId: string): Promise<RefEdgeRow[]> {
+    const r = await pool.query<RefEdgeRow>(
+      'SELECT snippet_id,ref_doc_id,created_at FROM ref_edges WHERE ref_doc_id=$1',
+      [refDocId],
+    );
+    return r.rows;
   },
 };

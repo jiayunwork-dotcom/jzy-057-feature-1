@@ -25,6 +25,8 @@ const db = {
   tokens: new Map<string, string>(),
   docs: new Map<string, any>(),
   members: new Map<string, string>(),
+  snippets: new Map<string, any>(),
+  edges: [] as Array<{ snippet_id: string; ref_doc_id: string }>,
 };
 
 vi.mock('../src/repo.js', () => ({
@@ -40,6 +42,7 @@ vi.mock('../src/repo.js', () => ({
       if (!doc) return null;
       return doc.owner_id === uid ? 'owner' : (db.members.get(`${docId}:${uid}`) ?? null);
     },
+    getDoc: async (id: string) => db.docs.get(id) ?? null,
     loadOps: async () => [],
     appendOps: vi.fn(async () => undefined),
     listComments: async () => [],
@@ -47,6 +50,26 @@ vi.mock('../src/repo.js', () => ({
     updateCommentAnchor: vi.fn(),
     listVersions: async () => [],
     insertVersion: vi.fn(),
+    listSnippets: async (docId: string) =>
+      [...db.snippets.values()].filter((s: any) => s.doc_id === docId),
+    getSnippets: async (ids: string[]) =>
+      ids.map((id) => db.snippets.get(id)).filter(Boolean),
+    getSnippet: async (id: string) => db.snippets.get(id) ?? null,
+    insertSnippet: vi.fn(async (s: any) => void db.snippets.set(s.id, s)),
+    updateSnippetAnchor: vi.fn(async (id: string, quote: string, idx: number, status: string) => {
+      const s = db.snippets.get(id);
+      if (s) Object.assign(s, { quote, anchor_idx: idx, status });
+    }),
+    listAllRefEdges: async () => db.edges,
+    listEdgesBySnippet: async (sid: string) =>
+      db.edges.filter((e) => e.snippet_id === sid),
+    listEdgesByRefDoc: async (rid: string) =>
+      db.edges.filter((e) => e.ref_doc_id === rid),
+    insertRefEdge: vi.fn(async (sid: string, rid: string) => {
+      if (db.edges.some((e) => e.snippet_id === sid && e.ref_doc_id === rid)) return false;
+      db.edges.push({ snippet_id: sid, ref_doc_id: rid });
+      return true;
+    }),
   },
 }));
 
@@ -81,6 +104,13 @@ beforeAll(async () => {
   db.docs.set(DOC, { id: DOC, owner_id: 'u1' });
   db.members.set(`${DOC}:u2`, 'editor');
 
+  // Cross-document reference fixtures: SOURCE (owned by alice) and REFERENCER
+  // (owned by bob). alice can view both; bob can view both as a member.
+  db.docs.set('SRC', { id: 'SRC', owner_id: 'u1' });
+  db.docs.set('REF', { id: 'REF', owner_id: 'u2' });
+  db.members.set('SRC:u2', 'viewer');
+  db.members.set('REF:u1', 'viewer');
+
   server = createServer();
   new RealtimeGateway(server, 30_000);
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -93,6 +123,10 @@ afterAll(async () => {
 
 function connect(token: string): WebSocket {
   return new WebSocket(`ws://127.0.0.1:${port}/ws/${DOC}?token=${token}`);
+}
+
+function connectTo(docId: string, token: string): WebSocket {
+  return new WebSocket(`ws://127.0.0.1:${port}/ws/${docId}?token=${token}`);
 }
 
 function waitFor(cond: () => boolean, label: string, timeoutMs = 3000): Promise<void> {
@@ -180,4 +214,95 @@ describe('realtime gateway', () => {
     });
     expect(code).toBe(1008);
   });
+
+  it('propagates a source snippet edit across the document boundary in real time', async () => {
+    // 1. Register a snippet in the SOURCE document and an edge REF -> snippet.
+    const { referenceService } = await import('../src/services/referenceService.js');
+    const { getRoom } = await import('../src/realtime/DocumentRoom.js');
+
+    // A collaborator has the SOURCE document open (this also makes the
+    // propagator watch it). Nobody editing REF needs to be in the source room
+    // beyond this single socket.
+    const sourceSocket = connectTo('SRC', 'tok1');
+    const sourceInbox: any[] = [];
+    sourceSocket.on('message', (raw: Buffer) => sourceInbox.push(JSON.parse(raw.toString())));
+    await waitFor(() => sourceInbox.some((m) => m.t === 'init'), 'src-init');
+
+    const sourceRoom = await getRoom('SRC');
+    const seed = new CrdtDoc();
+    await sourceRoom.appendSystemOps(seed.edit('s', 0, 0, '部署前置条件：Node 20'), 'u1');
+    const snippet = await referenceService.register('SRC', 'u1', '部署前置条件：Node 20', 0, '前置条件');
+    expect(snippet.quote).toBe('部署前置条件：Node 20');
+    db.edges.push({ snippet_id: snippet.id, ref_doc_id: 'REF' });
+
+    // 2. Pre-place the marker in REF's body, then open a socket for it.
+    const refRoom = await getRoom('REF');
+    const refSeed = new CrdtDoc();
+    const marker = `^ref[${snippet.id}#ref_block1]`;
+    await refRoom.appendSystemOps(refSeed.edit('s', 0, 0, `引言\n${marker}\n结尾`), 'u2');
+
+    const refInbox: any[] = [];
+    const refSocket = connectTo('REF', 'tok2');
+    refSocket.on('message', (raw: Buffer) => refInbox.push(JSON.parse(raw.toString())));
+
+    // Initial push must carry the snippet content verbatim.
+    await waitFor(
+      () => refInbox.some((m) => m.t === 'refs' && m.refs.some((r: any) => r.snippetId === snippet.id)),
+      'initial-refs',
+    );
+    const initial = refInbox
+      .flatMap((m) => (m.t === 'refs' ? m.refs : []))
+      .find((r: any) => r.snippetId === snippet.id);
+    expect(initial.status).toBe('anchored');
+    expect(initial.content).toBe('部署前置条件：Node 20');
+
+    // 3. Edit the snippet IN ITS OWN DOCUMENT (a collaborator is not in REF).
+    const editor = new CrdtDoc();
+    sourceRoom.allOps().forEach((o) => editor.integrate(o));
+    const text = editor.text();
+    const idx = text.indexOf('20');
+    const editOps = editor.edit('u1', idx, 2, '24');
+    await sourceRoom.ingest(editOps, 'u1');
+
+    // 4. The REF socket receives the new content without a refresh.
+    await waitFor(
+      () =>
+        refInbox.some(
+          (m) =>
+            m.t === 'refs' &&
+            m.refs.some((r: any) => r.snippetId === snippet.id && r.content === '部署前置条件：Node 24'),
+        ),
+      'live-ref-update',
+      5000,
+    );
+    const updated = refInbox
+      .flatMap((m) => (m.t === 'refs' ? m.refs : []))
+      .find((r: any) => r.snippetId === snippet.id);
+    expect(updated.content).toBe('部署前置条件：Node 24');
+
+    // 5. Delete the source snippet wholesale -> the reference degrades to
+    //    'lost' but retains the last-seen content.
+    const deleter = new CrdtDoc();
+    sourceRoom.allOps().forEach((o) => deleter.integrate(o));
+    const cur = deleter.text();
+    const delOps = deleter.edit('u1', 0, cur.length, '完全不同的内容');
+    await sourceRoom.ingest(delOps, 'u1');
+    await waitFor(
+      () =>
+        refInbox.some(
+          (m) =>
+            m.t === 'refs' &&
+            m.refs.some((r: any) => r.snippetId === snippet.id && r.status === 'lost'),
+        ),
+      'lost-ref',
+      5000,
+    );
+    const lost = refInbox
+      .flatMap((m) => (m.t === 'refs' ? m.refs : []))
+      .find((r: any) => r.snippetId === snippet.id && r.status === 'lost');
+    expect(lost.content).toBeTruthy(); // last-known content retained
+
+    refSocket.close();
+    sourceSocket.close();
+  }, 15_000);
 });

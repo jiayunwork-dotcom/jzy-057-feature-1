@@ -14,6 +14,8 @@ const db = {
   versions: new Map<string, any[]>(),
   comments: new Map<string, any[]>(),
   replies: new Map<string, any[]>(),
+  snippets: new Map<string, any>(),
+  edges: [] as Array<{ snippet_id: string; ref_doc_id: string }>,
 };
 
 const membersKey = (d: string, u: string) => `${d}:${u}`;
@@ -114,6 +116,27 @@ vi.mock('../src/repo.js', () => {
         arr.push(r);
         db.replies.set(r.comment_id, arr);
       },
+
+      insertSnippet: async (s: any) => void db.snippets.set(s.id, s),
+      getSnippet: async (id: string) => db.snippets.get(id) ?? null,
+      listSnippets: async (d: string) =>
+        [...db.snippets.values()].filter((s: any) => s.doc_id === d),
+      getSnippets: async (ids: string[]) =>
+        ids.map((id) => db.snippets.get(id)).filter(Boolean),
+      updateSnippetAnchor: async (id: string, quote: string, idx: number, status: string) => {
+        const s = db.snippets.get(id);
+        if (s) Object.assign(s, { quote, anchor_idx: idx, status });
+      },
+      insertRefEdge: async (sid: string, rid: string) => {
+        if (db.edges.some((e) => e.snippet_id === sid && e.ref_doc_id === rid)) return false;
+        db.edges.push({ snippet_id: sid, ref_doc_id: rid });
+        return true;
+      },
+      listAllRefEdges: async () => db.edges,
+      listEdgesBySnippet: async (sid: string) =>
+        db.edges.filter((e) => e.snippet_id === sid),
+      listEdgesByRefDoc: async (rid: string) =>
+        db.edges.filter((e) => e.ref_doc_id === rid),
     },
   };
 });
@@ -272,5 +295,133 @@ describe('REST interface layer', () => {
     // Intermediate snapshot content remains reachable (history not lost).
     const mid = await owner.get(`/api/documents/${DOC}/versions/${snap2.id}/text`);
     expect((mid.json() as { text: string }).text).toContain('END!');
+  });
+});
+
+describe('cross-document live references', () => {
+  // A: owner-owned, B: editor-owned, SEC: owner-only (no memberships).
+  const A = 'doc-a';
+  const B = 'doc-b';
+  const SEC = 'doc-secret';
+
+  beforeAll(async () => {
+    db.docs.set(A, { id: A, folder_id: null, title: '文档甲', owner_id: 'u-owner' });
+    db.docs.set(B, { id: B, folder_id: null, title: '文档乙', owner_id: 'u-editor' });
+    db.docs.set(SEC, { id: SEC, folder_id: null, title: '机密文档', owner_id: 'u-owner' });
+    // Cross visibility: owner can view B; editor can view/edit A.
+    const { repo: r } = await import('../src/repo.js');
+    await r.setRole(B, 'u-owner', 'viewer');
+    await r.setRole(A, 'u-editor', 'editor');
+    await r.setRole(A, 'u-reviewer', 'reviewer');
+  });
+
+  it('renders verbatim source content and adopts a partial rewrite', async () => {
+    const { referenceService } = await import('../src/services/referenceService.js');
+    const room = await getRoom(A);
+    const c = new CrdtDoc();
+    room.allOps().forEach((o) => c.integrate(o));
+    await room.ingest(
+      c.edit('u-owner', room.text().length, 0, '共享术语：CRDT 表示无冲突复制数据类型'),
+      'u-owner',
+    );
+
+    const snip = await referenceService.register(
+      A,
+      'u-owner',
+      '共享术语：CRDT 表示无冲突复制数据类型',
+      room.text().indexOf('共享术语'),
+      '术语',
+    );
+
+    // Viewer of A can read the content verbatim.
+    const view = await referenceService.viewFor(snip.id, 'viewer');
+    expect(view!.status).toBe('anchored');
+    expect(view!.content).toBe('共享术语：CRDT 表示无冲突复制数据类型');
+
+    // Insert a large block BEFORE the snippet: it must not drift.
+    const c0 = new CrdtDoc();
+    room.allOps().forEach((o) => c0.integrate(o));
+    const prefix = 'X'.repeat(500);
+    await room.ingest(c0.edit('u-owner', 0, 0, prefix + '\n'), 'u-owner');
+    let changed = await referenceService.reanchor(A, room.text());
+    expect(changed.map((s) => s.id)).toContain(snip.id);
+    const still = await referenceService.viewFor(snip.id, 'viewer');
+    expect(still!.content).toBe('共享术语：CRDT 表示无冲突复制数据类型');
+    expect(still!.index).toBe(prefix.length + 1);
+
+    // Partially rewrite the snippet (last char): content follows verbatim.
+    const c2 = new CrdtDoc();
+    room.allOps().forEach((o) => c2.integrate(o));
+    const tail = c2.text().lastIndexOf('类型');
+    await room.ingest(c2.edit('u-owner', tail + 1, 1, '型 ✅'), 'u-owner');
+    changed = await referenceService.reanchor(A, room.text());
+    expect(changed.map((s) => s.id)).toContain(snip.id);
+    const after = await referenceService.viewFor(snip.id, 'viewer');
+    expect(after!.content).toBe('共享术语：CRDT 表示无冲突复制数据类 ✅');
+  });
+
+  it('degrades to lost with last content retained after wholesale deletion', async () => {
+    const { referenceService } = await import('../src/services/referenceService.js');
+    const room = await getRoom(A);
+    const snip = await referenceService.register(A, 'u-owner', '即将删除的片段', 0, '临时');
+    const c = new CrdtDoc();
+    room.allOps().forEach((o) => c.integrate(o));
+    const t = c.text();
+    await room.ingest(c.edit('u-owner', 0, t.length, '与之前完全无关的正文'), 'u-owner');
+    await referenceService.reanchor(A, room.text());
+    const lost = await referenceService.viewFor(snip.id, 'viewer');
+    expect(lost!.status).toBe('lost');
+    expect(lost!.content).toBe('即将删除的片段');
+  });
+
+  it('rejects a direct/indirect cycle through the HTTP API and persists no edge', async () => {
+    const { referenceService } = await import('../src/services/referenceService.js');
+    const sA = await referenceService.register(A, 'u-owner', '甲的片段', 0, '甲');
+    // B -> A (allowed).
+    await referenceService.createReference(sA.id, B);
+
+    // Owner tries to reference a B snippet FROM A: closes A -> B -> A.
+    const sB = await referenceService.register(B, 'u-editor', '乙的片段', 0, '乙');
+    const ownerTok = await tokenFor('owner', 'owner123');
+    const owner = await asUser(ownerTok);
+    const res = await owner.post(`/api/documents/${A}/references`, {
+      snippetId: sB.id,
+      index: 0,
+    });
+    expect(res.statusCode).toBe(409);
+    expect((res.json() as { code?: string }).code).toBe('ref_cycle');
+    expect(db.edges.some((e) => e.snippet_id === sB.id && e.ref_doc_id === A)).toBe(false);
+  });
+
+  it('never leaks source content to a user without source view permission', async () => {
+    const { referenceService } = await import('../src/services/referenceService.js');
+    const secret = await referenceService.register(SEC, 'u-owner', '机密：内部密钥轮换流程', 0, '机密');
+
+    const denied = await referenceService.viewFor(secret.id, null);
+    expect(denied!.status).toBe('denied');
+    expect(denied!.content).toBeNull();
+    expect(denied!.sourceDocId).toBe(SEC);
+
+    // The POST route refuses embedding an inaccessible source even for an
+    // editor who fully controls the referencing document.
+    const editorTok = await tokenFor('editor', 'editor123');
+    const editor = await asUser(editorTok);
+    const res = await editor.post(`/api/documents/${B}/references`, {
+      snippetId: secret.id,
+      index: 0,
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('forbids a reviewer (comment-only) from inserting a reference block', async () => {
+    const { referenceService } = await import('../src/services/referenceService.js');
+    const snip = await referenceService.register(A, 'u-owner', '评审可见片段', 0, '评审');
+    const reviewerTok = await tokenFor('reviewer', 'reviewer123');
+    const reviewer = await asUser(reviewerTok);
+    const res = await reviewer.post(`/api/documents/${A}/references`, {
+      snippetId: snip.id,
+      index: 0,
+    });
+    expect(res.statusCode).toBe(403);
   });
 });

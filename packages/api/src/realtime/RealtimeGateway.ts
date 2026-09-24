@@ -1,12 +1,14 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'node:http';
-import type { Op } from '@collabmd/core';
+import { referencedSnippetIds, type Op } from '@collabmd/core';
 import { repo } from '../repo.js';
 import { redis, presenceKey } from '../redis.js';
 import { roleCan, type Role } from '../config.js';
-import { getRoom, type DocumentRoom } from './DocumentRoom.js';
+import { getRoom, peekRoom, type DocumentRoom } from './DocumentRoom.js';
 import { commentService } from '../services/commentService.js';
-import type { ClientMsg, PresenceUser, ServerMsg } from './protocol.js';
+import { referenceService } from '../services/referenceService.js';
+import { referencePropagator } from './ReferencePropagator.js';
+import type { ClientMsg, RefWire, PresenceUser, ServerMsg } from './protocol.js';
 
 interface Session {
   ws: WebSocket;
@@ -78,6 +80,7 @@ export class RealtimeGateway {
     }
 
     const room = await getRoom(docId);
+    referencePropagator.watch(room);
     const session: Session = {
       ws,
       docId,
@@ -113,6 +116,9 @@ export class RealtimeGateway {
         threadState: c.thread_state,
       })),
     });
+
+    // Initial, permission-filtered content for every marker in this document.
+    await this.pushRefs(room, session.userId, ws);
 
     await this.markPresence(session);
     this.broadcastPresence(docId);
@@ -166,8 +172,16 @@ export class RealtimeGateway {
           author: ev.author,
           fromVersion: ev.fromVersion,
         });
+        void this.pushAnchors(room.docId);
+        // Markers are body text: an edit may have inserted/removed one, so
+        // refresh each viewer's permission-filtered reference set.
+        void this.pushAllRefs(room.docId);
       } else if (ev.type === 'anchors') {
         void this.pushAnchors(room.docId);
+      } else if (ev.type === 'snippets') {
+        // A snippet in another document changed. Resolve per distinct viewer
+        // (their source-doc roles differ) and send only their sockets.
+        void this.pushChangedRefs(room.docId, ev.snippetIds);
       }
     });
     this.unsubscribers.set(room.docId, off);
@@ -186,6 +200,86 @@ export class RealtimeGateway {
         threadState: c.thread_state,
       })),
     });
+  }
+
+  // ---- cross-document references (permission-filtered, targeted pushes) ----
+
+  /** Resolve the markers currently present in a document to snippet ids. */
+  private markerSnippetIds(room: DocumentRoom): string[] {
+    return referencedSnippetIds(room.text());
+  }
+
+  /** Build one viewer's RefWire[] for the given snippet ids (or all markers). */
+  private async resolveRefs(
+    docId: string,
+    userId: string,
+    snippetIds?: string[],
+  ): Promise<RefWire[]> {
+    const room = await getRoom(docId);
+    const ids = snippetIds ?? this.markerSnippetIds(room);
+    if (ids.length === 0) return [];
+    const views = await referenceService.viewForMany(ids, async (sourceDocId) =>
+      repo.getRole(sourceDocId, userId),
+    );
+    return views.map((v) => ({
+      snippetId: v.snippetId,
+      sourceDocId: v.sourceDocId,
+      sourceTitle: v.sourceTitle,
+      status: v.status,
+      content: v.content,
+    }));
+  }
+
+  private async pushRefs(
+    room: DocumentRoom,
+    userId: string,
+    ws: WebSocket,
+    snippetIds?: string[],
+  ): Promise<void> {
+    try {
+      const refs = await this.resolveRefs(room.docId, userId, snippetIds);
+      this.send(ws, { t: 'refs', refs });
+    } catch (e) {
+      console.error('[refs] push failed', room.docId, e);
+    }
+  }
+
+  /** Re-send the full reference set to every open socket of a document. */
+  private async pushAllRefs(docId: string): Promise<void> {
+    const room = peekRoom(docId);
+    if (!room) return;
+    const userIds = [
+      ...new Set(
+        [...this.sessions].filter((s) => s.docId === docId).map((s) => s.userId),
+      ),
+    ];
+    for (const userId of userIds) {
+      const refs = await this.resolveRefs(docId, userId);
+      const data = JSON.stringify({ t: 'refs', refs });
+      for (const s of this.sessions) {
+        if (s.docId === docId && s.userId === userId && s.ws.readyState === WebSocket.OPEN) {
+          s.ws.send(data);
+        }
+      }
+    }
+  }
+
+  /** Push only the changed snippets to each distinct viewer's sockets. */
+  private async pushChangedRefs(docId: string, snippetIds: string[]): Promise<void> {
+    const userIds = [
+      ...new Set(
+        [...this.sessions].filter((s) => s.docId === docId).map((s) => s.userId),
+      ),
+    ];
+    for (const userId of userIds) {
+      const refs = await this.resolveRefs(docId, userId, snippetIds);
+      const data = JSON.stringify({ t: 'refs', refs });
+      for (const s of this.sessions) {
+        if (s.docId === docId && s.userId === userId && s.ws.readyState === WebSocket.OPEN) {
+          s.ws.send(data);
+        }
+      }
+    }
   }
 
   // ---- presence (Redis HASH per doc) ----

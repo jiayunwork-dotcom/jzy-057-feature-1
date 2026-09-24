@@ -6,7 +6,13 @@ type Listener = (event: RoomEvent) => void;
 
 export type RoomEvent =
   | { type: 'ops'; ops: Op[]; author: string; fromVersion: number }
-  | { type: 'anchors' };
+  | { type: 'anchors' }
+  /**
+   * Cross-document: a snippet *referenced by markers in this document* was
+   * re-anchored in its own source document. The payload only carries snippet
+   * ids; content is delivered per-session after a source-permission check.
+   */
+  | { type: 'snippets'; snippetIds: string[] };
 
 /**
  * In-memory authority for one open document: the converged CRDT replica,
@@ -145,17 +151,39 @@ export class DocumentRoom {
   markClean(): void {
     this.dirty = false;
   }
+
+  /**
+   * Cross-document nudge: a snippet embedded by markers in THIS document was
+   * edited in its own source document. The gateway turns this into
+   * permission-filtered content pushes; no content is embedded here.
+   */
+  notifySnippetsChanged(snippetIds: string[]): void {
+    if (snippetIds.length > 0) this.emit({ type: 'snippets', snippetIds });
+  }
 }
 
-/** Registry of currently loaded rooms. */
+/** Registry of currently loaded rooms (pending and resolved). */
 const rooms = new Map<string, Promise<DocumentRoom>>();
+const resolvedRooms = new Map<string, DocumentRoom>();
 
 export async function getRoom(docId: string): Promise<DocumentRoom> {
   const existing = rooms.get(docId);
   if (existing) return existing;
-  const loading = DocumentRoom.load(docId);
+  const loading = DocumentRoom.load(docId).then((room) => {
+    resolvedRooms.set(docId, room);
+    return room;
+  });
   rooms.set(docId, loading);
   return loading;
+}
+
+/**
+ * Return the room only if it is already loaded in this process. Cross-document
+ * propagation must never force-load a document nobody has open: there would be
+ * no socket to notify.
+ */
+export function peekRoom(docId: string): DocumentRoom | null {
+  return resolvedRooms.get(docId) ?? null;
 }
 
 /** Persist an auto checkpoint at the current op log offset. */

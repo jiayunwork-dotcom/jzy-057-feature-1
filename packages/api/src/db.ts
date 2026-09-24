@@ -93,8 +93,30 @@ export async function migrate(): Promise<void> {
       created_at BIGINT NOT NULL
     );
 
+    -- Cross-document live references.
+    CREATE TABLE IF NOT EXISTS ref_snippets (
+      id         TEXT PRIMARY KEY,
+      doc_id     TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      quote      TEXT NOT NULL,
+      anchor_idx INTEGER NOT NULL,
+      status     TEXT NOT NULL DEFAULT 'anchored',
+      author     TEXT NOT NULL,
+      title      TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ref_edges (
+      snippet_id TEXT NOT NULL REFERENCES ref_snippets(id) ON DELETE CASCADE,
+      ref_doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      created_at BIGINT NOT NULL,
+      PRIMARY KEY (snippet_id, ref_doc_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_ops_doc ON doc_ops(doc_id, seq);
     CREATE INDEX IF NOT EXISTS idx_versions_doc ON versions(doc_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_comments_doc ON comments(doc_id);
+    CREATE INDEX IF NOT EXISTS idx_snippets_doc ON ref_snippets(doc_id);
+    CREATE INDEX IF NOT EXISTS idx_edges_snippet ON ref_edges(snippet_id);
+    CREATE INDEX IF NOT EXISTS idx_edges_refdoc ON ref_edges(ref_doc_id);
   `);
 }

@@ -40,3 +40,24 @@ export {
   type VersionKind,
   type MaterializedVersion,
 } from './version/version.js';
+
+// Cross-document live references: block markers, dependency graph / cycle
+// detection and snippet anchor following. Kept as its own concern, never mixed
+// into the single-document CRDT merge kernel.
+export {
+  parseMarkerLine,
+  findMarkers,
+  referencedSnippetIds,
+  markerLine,
+  buildMarkerInsertion,
+  documentGraph,
+  wouldCreateCycle,
+  resolveSnippet,
+  resolveSnippets,
+  type Marker,
+  type MarkerInsertion,
+  type DepEdge,
+  type SnippetAnchor,
+  type SnippetStatus,
+  type ResolvedSnippet,
+} from './reference/index.js';
