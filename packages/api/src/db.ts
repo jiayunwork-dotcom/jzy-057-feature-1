@@ -93,8 +93,38 @@ export async function migrate(): Promise<void> {
       created_at BIGINT NOT NULL
     );
 
+    -- Live cross-document references.
+    -- excerpts: a passage registered in a source document. The primary anchor
+    -- is the pair of CRDT character ids at the passage boundaries (immune to
+    -- shifts and interior rewrites); quote/anchor_idx are the fuzzy fallback
+    -- when the boundary characters themselves get deleted.
+    CREATE TABLE IF NOT EXISTS excerpts (
+      id           TEXT PRIMARY KEY,
+      doc_id       TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      quote        TEXT NOT NULL,
+      anchor_idx   INTEGER NOT NULL,
+      start_id     JSONB,
+      end_id       JSONB,
+      status       TEXT NOT NULL DEFAULT 'anchored',
+      last_content TEXT NOT NULL,
+      deleted      BOOLEAN NOT NULL DEFAULT FALSE,
+      author       TEXT NOT NULL,
+      created_at   BIGINT NOT NULL
+    );
+
+    -- ref_edges: which document embeds a reference to which excerpt.
+    -- Reconciled from the reference markers actually present in each body, so
+    -- rows disappear when the last marker is edited out.
+    CREATE TABLE IF NOT EXISTS ref_edges (
+      doc_id     TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      excerpt_id TEXT NOT NULL REFERENCES excerpts(id) ON DELETE CASCADE,
+      PRIMARY KEY (doc_id, excerpt_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_ops_doc ON doc_ops(doc_id, seq);
     CREATE INDEX IF NOT EXISTS idx_versions_doc ON versions(doc_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_comments_doc ON comments(doc_id);
+    CREATE INDEX IF NOT EXISTS idx_excerpts_doc ON excerpts(doc_id);
+    CREATE INDEX IF NOT EXISTS idx_ref_edges_excerpt ON ref_edges(excerpt_id);
   `);
 }

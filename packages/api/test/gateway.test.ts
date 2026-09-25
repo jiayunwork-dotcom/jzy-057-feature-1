@@ -35,6 +35,7 @@ vi.mock('../src/repo.js', () => ({
     },
     listUsers: async () =>
       [...db.users.values()].map(({ id, username, color }) => ({ id, username, color })),
+    getDoc: async (id: string) => db.docs.get(id) ?? null,
     getRole: async (docId: string, uid: string) => {
       const doc = db.docs.get(docId);
       if (!doc) return null;
@@ -47,6 +48,10 @@ vi.mock('../src/repo.js', () => ({
     updateCommentAnchor: vi.fn(),
     listVersions: async () => [],
     insertVersion: vi.fn(),
+    // reference layer persistence (no references in these tests)
+    listAllEdges: async () => [],
+    listAllExcerpts: async () => [],
+    listExcerptsByIds: async () => [],
   },
 }));
 

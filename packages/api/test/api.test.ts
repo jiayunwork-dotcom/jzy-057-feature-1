@@ -14,6 +14,8 @@ const db = {
   versions: new Map<string, any[]>(),
   comments: new Map<string, any[]>(),
   replies: new Map<string, any[]>(),
+  excerpts: new Map<string, any>(), // excerptId -> row
+  edges: new Set<string>(), // `${docId}:${excerptId}`
 };
 
 const membersKey = (d: string, u: string) => `${d}:${u}`;
@@ -114,6 +116,62 @@ vi.mock('../src/repo.js', () => {
         arr.push(r);
         db.replies.set(r.comment_id, arr);
       },
+
+      // ---- live cross-document references ----
+      insertExcerpt: async (e: any) => void db.excerpts.set(e.id, { ...e }),
+      getExcerpt: async (id: string) => db.excerpts.get(id) ?? null,
+      listExcerpts: async (docId: string) =>
+        [...db.excerpts.values()].filter((e) => e.doc_id === docId && !e.deleted),
+      listExcerptsByIds: async (ids: string[]) =>
+        ids.map((id) => db.excerpts.get(id)).filter(Boolean),
+      listAllExcerpts: async () => [...db.excerpts.values()],
+      updateExcerptAnchor: async (
+        id: string,
+        idx: number,
+        status: string,
+        last: string,
+        startId: any,
+        endId: any,
+      ) => {
+        const e = db.excerpts.get(id);
+        if (e) {
+          e.anchor_idx = idx;
+          e.status = status;
+          e.last_content = last;
+          e.start_id = startId;
+          e.end_id = endId;
+        }
+      },
+      softDeleteExcerpt: async (id: string) => {
+        const e = db.excerpts.get(id);
+        if (e) e.deleted = true;
+      },
+      reconcileEdges: async (docId: string, excerptIds: string[]) => {
+        for (const key of [...db.edges]) {
+          const [d, e] = key.split('::');
+          if (d === docId && !excerptIds.includes(e)) db.edges.delete(key);
+        }
+        for (const e of excerptIds) db.edges.add(`${docId}::${e}`);
+      },
+      listEdgesForDoc: async (docId: string) =>
+        [...db.edges]
+          .filter((k) => k.startsWith(`${docId}::`))
+          .map((k) => ({ doc_id: docId, excerpt_id: k.split('::')[1] })),
+      listEdgesReferencing: async (excerptIds: string[]) =>
+        [...db.edges]
+          .map((k) => k.split('::'))
+          .filter(([, e]) => excerptIds.includes(e))
+          .map(([d, e]) => ({ doc_id: d, excerpt_id: e })),
+      listAllEdges: async () =>
+        [...db.edges].map((k) => {
+          const [d, e] = k.split('::');
+          return { doc_id: d, excerpt_id: e };
+        }),
+      listReferencedExcerpts: async (docId: string) =>
+        [...db.edges]
+          .filter((k) => k.startsWith(`${docId}::`))
+          .map((k) => db.excerpts.get(k.split('::')[1]))
+          .filter(Boolean),
     },
   };
 });

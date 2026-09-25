@@ -40,3 +40,23 @@ export {
   type VersionKind,
   type MaterializedVersion,
 } from './version/version.js';
+
+export {
+  REF_MARKER_PREFIX,
+  REF_MARKER_SUFFIX,
+  REF_MARKER_RE,
+  refMarker,
+  parseRefMarkers,
+  referencedExcerptIds,
+  type RefMarker,
+  resolveExcerpt,
+  type ExcerptAnchor,
+  type ResolvedExcerpt,
+  type ExcerptStatus,
+  ReferenceGraph,
+  expandMarkdown,
+  MAX_EXPAND_DEPTH,
+  type RefResolver,
+  type ResolvedRef,
+  type RenderBlock,
+} from './ref/index.js';

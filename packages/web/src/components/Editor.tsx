@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { CollabSession } from '../collab/CollabSession';
 import type { Comment } from '../api/client';
 import { diffTextChange } from '../collab/textChange';
+import { parseRefMarkers } from '@collabmd/core';
 
 interface Props {
   session: CollabSession;
@@ -10,6 +11,7 @@ interface Props {
   canEdit: boolean;
   previewScrollRef: React.MutableRefObject<HTMLDivElement | null>;
   onSelect: (quote: string, index: number) => void;
+  onCursor?: (index: number) => void;
 }
 
 interface Mark {
@@ -36,7 +38,7 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-export function Editor({ session, text, comments, canEdit, previewScrollRef, onSelect }: Props) {
+export function Editor({ session, text, comments, canEdit, previewScrollRef, onSelect, onCursor }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const layerRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -53,6 +55,10 @@ export function Editor({ session, text, comments, canEdit, previewScrollRef, onS
       const start = Math.max(0, Math.min(c.index, text.length));
       const end = Math.max(start, Math.min(c.end ?? start, text.length));
       if (end > start) out.push({ id: c.id, start, end, cls: `cmt-mark ${c.thread_state}` });
+    }
+    // Compact live-reference markers get a distinct highlight in source view.
+    for (const m of parseRefMarkers(text)) {
+      out.push({ id: `ref:${m.excerptId}@${m.start}`, start: m.start, end: m.end, cls: 'ref-mark' });
     }
     return out.sort((a, b) => a.start - b.start || b.end - a.end);
   }, [comments, text]);
@@ -108,7 +114,10 @@ export function Editor({ session, text, comments, canEdit, previewScrollRef, onS
 
   const emitCursor = (): void => {
     const ta = taRef.current;
-    if (ta) session.sendCursor(ta.selectionStart, ta.selectionStart, ta.selectionEnd);
+    if (ta) {
+      session.sendCursor(ta.selectionStart, ta.selectionStart, ta.selectionEnd);
+      onCursor?.(ta.selectionStart);
+    }
   };
 
   const handleSelect = (): void => {

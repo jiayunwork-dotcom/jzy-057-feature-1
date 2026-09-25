@@ -1,4 +1,4 @@
-import { CrdtDoc } from '@collabmd/core';
+import { CrdtDoc, refMarker } from '@collabmd/core';
 import { pool } from './db.js';
 import { repo } from './repo.js';
 import { hashPassword, newId } from './auth.js';
@@ -20,6 +20,12 @@ const id: Id = [lamport, clientId];
 
 > 选中这一段文字，点击「加批注」即可开始评审。
 
+## 部署前置条件
+
+- Node.js 20.x（与 CI 保持一致）
+- Postgres 16 与 Redis 7 已就绪
+- 环境变量 DATABASE_URL / REDIS_URL 已配置
+
 | 角色 | 正文 | 批注 | 管理 |
 | --- | --- | --- | --- |
 | 所有者 | ✅ | ✅ | ✅ |
@@ -34,6 +40,11 @@ const id: Id = [lamport, clientId];
 
 [项目文档约定](https://example.com/style-guide) 评审时请遵守。
 `;
+
+/** Passage registered as the demo's shareable excerpt. */
+const DEMO_EXCERPT_QUOTE = `- Node.js 20.x（与 CI 保持一致）
+- Postgres 16 与 Redis 7 已就绪
+- 环境变量 DATABASE_URL / REDIS_URL 已配置`;
 
 interface SeedUser {
   username: string;
@@ -90,8 +101,77 @@ export async function seed(): Promise<void> {
     created_at: Date.now() - 60_000,
   });
 
-  // A second demo doc owned by editor to show shared trees.
-  await repo.createDoc(newId('d'), folder.id, '接口草案（编辑者所有）', ids.editor);
+  // Register the prerequisites passage as a referenceable excerpt.
+  const excerptId = newId('ex');
+  const excerptIdx = STARTER.indexOf(DEMO_EXCERPT_QUOTE);
+  const starterIds = crdt.visibleIds();
+  await repo.insertExcerpt({
+    id: excerptId,
+    doc_id: doc.id,
+    quote: DEMO_EXCERPT_QUOTE,
+    anchor_idx: excerptIdx,
+    start_id: starterIds[excerptIdx] ?? null,
+    end_id: starterIds[excerptIdx + DEMO_EXCERPT_QUOTE.length - 1] ?? null,
+    status: 'anchored',
+    last_content: DEMO_EXCERPT_QUOTE,
+    deleted: false,
+    author: ids.owner,
+    created_at: Date.now(),
+  });
+
+  // A restricted doc only the owner can read, with its own registered excerpt.
+  // The draft below references it too, so users without access see the
+  // reference degrade to "无权查看此引用来源" instead of leaking content.
+  const SECRET_QUOTE = '内部接口令牌每 24 小时轮换一次，切勿写入公开文档。';
+  const secretDoc = await repo.createDoc(newId('d'), null, '内部规范（仅所有者）', ids.owner);
+  const secretText = `# 内部规范\n\n${SECRET_QUOTE}\n`;
+  const secretCrdt = new CrdtDoc();
+  await repo.appendOps(secretDoc.id, 0, secretCrdt.edit('seed', 0, 0, secretText), 'seed');
+  const secretExcerptId = newId('ex');
+  const secretIdx = secretText.indexOf(SECRET_QUOTE);
+  const secretIds = secretCrdt.visibleIds();
+  await repo.insertExcerpt({
+    id: secretExcerptId,
+    doc_id: secretDoc.id,
+    quote: SECRET_QUOTE,
+    anchor_idx: secretIdx,
+    start_id: secretIds[secretIdx] ?? null,
+    end_id: secretIds[secretIdx + SECRET_QUOTE.length - 1] ?? null,
+    status: 'anchored',
+    last_content: SECRET_QUOTE,
+    deleted: false,
+    author: ids.owner,
+    created_at: Date.now(),
+  });
+
+  // A second demo doc owned by editor to show shared trees — it embeds live
+  // references to both excerpts above.
+  const draft = await repo.createDoc(newId('d'), folder.id, '接口草案（编辑者所有）', ids.editor);
+  const draftText = `# 接口草案
+
+## 环境要求
+
+本文档与《CollabMD 快速上手》共享同一份部署前置条件；源段落更新后，下面的引用块会实时跟随：
+
+${refMarker(excerptId)}
+
+## 内部约定（无权来源演示）
+
+下面引用的来源文档仅所有者可读；没有权限的协作者只会看到占位提示：
+
+${refMarker(secretExcerptId)}
+
+## 接口约定
+
+（草稿，待补充）
+`;
+  const draftCrdt = new CrdtDoc();
+  const draftOps = draftCrdt.edit('seed', 0, 0, draftText);
+  await repo.appendOps(draft.id, 0, draftOps, 'seed');
+  await repo.reconcileEdges(draft.id, [excerptId, secretExcerptId]);
+  await repo.setRole(draft.id, ids.owner, 'editor');
+  await repo.setRole(draft.id, ids.reviewer, 'reviewer');
+  await repo.setRole(draft.id, ids.viewer, 'viewer');
 
   console.log('seed complete: owner/editor/reviewer/viewer with demo doc');
 }

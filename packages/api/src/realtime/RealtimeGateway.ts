@@ -5,6 +5,7 @@ import { repo } from '../repo.js';
 import { redis, presenceKey } from '../redis.js';
 import { roleCan, type Role } from '../config.js';
 import { getRoom, type DocumentRoom } from './DocumentRoom.js';
+import { referenceCoordinator } from './ReferenceCoordinator.js';
 import { commentService } from '../services/commentService.js';
 import type { ClientMsg, PresenceUser, ServerMsg } from './protocol.js';
 
@@ -43,6 +44,17 @@ export class RealtimeGateway {
       });
     });
     this.wss.on('connection', (ws, req) => this.handle(ws, req.url ?? '', req.headers.cookie ?? ''));
+
+    // Cross-document reference propagation: the coordinator names exactly the
+    // documents affected by an excerpt/edge change; each affected session gets
+    // its own permission-filtered snapshot. No broadcast, no polling.
+    referenceCoordinator.subscribe((ev) => {
+      if (ev.type !== 'refs-changed') return;
+      const affected = new Set(ev.docIds);
+      for (const s of this.sessions) {
+        if (affected.has(s.docId)) void this.pushRefs(s);
+      }
+    });
   }
 
   private send(ws: WebSocket, msg: ServerMsg): void {
@@ -113,6 +125,7 @@ export class RealtimeGateway {
         threadState: c.thread_state,
       })),
     });
+    await this.pushRefs(session);
 
     await this.markPresence(session);
     this.broadcastPresence(docId);
@@ -186,6 +199,16 @@ export class RealtimeGateway {
         threadState: c.thread_state,
       })),
     });
+  }
+
+  /** Fresh reference snapshot for one session, filtered by that user's rights. */
+  private async pushRefs(session: Session): Promise<void> {
+    try {
+      const refs = await referenceCoordinator.snapshotFor(session.docId, session.userId);
+      this.send(session.ws, { t: 'refs', refs });
+    } catch {
+      /* keep the client's last known state on transient failures */
+    }
   }
 
   // ---- presence (Redis HASH per doc) ----

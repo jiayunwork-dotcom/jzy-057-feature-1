@@ -1,5 +1,5 @@
 import { pool } from './db.js';
-import type { Op } from '@collabmd/core';
+import type { Id, Op } from '@collabmd/core';
 import type { Role } from './config.js';
 
 export interface UserRow {
@@ -51,6 +51,26 @@ export interface ReplyRow {
   author: string;
   body: string;
   created_at: number;
+}
+
+export interface ExcerptRow {
+  id: string;
+  doc_id: string;
+  quote: string;
+  anchor_idx: number;
+  /** CRDT character ids of the first/last passage characters (exact anchor). */
+  start_id: Id | null;
+  end_id: Id | null;
+  status: 'anchored' | 'lost';
+  last_content: string;
+  deleted: boolean;
+  author: string;
+  created_at: number;
+}
+
+export interface RefEdgeRow {
+  doc_id: string;
+  excerpt_id: string;
 }
 
 const now = (): number => Date.now();
@@ -299,5 +319,118 @@ export const repo = {
       'INSERT INTO comment_replies(id,comment_id,author,body,created_at) VALUES($1,$2,$3,$4,$5)',
       [r.id, r.comment_id, r.author, r.body, r.created_at],
     );
+  },
+
+  // ---- live cross-document references ----
+  async insertExcerpt(e: ExcerptRow): Promise<void> {
+    await pool.query(
+      `INSERT INTO excerpts(id,doc_id,quote,anchor_idx,start_id,end_id,status,last_content,deleted,author,created_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [e.id, e.doc_id, e.quote, e.anchor_idx,
+       e.start_id ? JSON.stringify(e.start_id) : null,
+       e.end_id ? JSON.stringify(e.end_id) : null,
+       e.status, e.last_content, e.deleted, e.author, e.created_at],
+    );
+  },
+  async getExcerpt(id: string): Promise<ExcerptRow | null> {
+    const r = await pool.query<ExcerptRow>(
+      'SELECT id,doc_id,quote,anchor_idx,start_id,end_id,status,last_content,deleted,author,created_at FROM excerpts WHERE id=$1',
+      [id],
+    );
+    return r.rows[0] ?? null;
+  },
+  async listExcerpts(docId: string): Promise<ExcerptRow[]> {
+    const r = await pool.query<ExcerptRow>(
+      `SELECT id,doc_id,quote,anchor_idx,start_id,end_id,status,last_content,deleted,author,created_at
+       FROM excerpts WHERE doc_id=$1 AND deleted=FALSE ORDER BY created_at`,
+      [docId],
+    );
+    return r.rows;
+  },
+  async listExcerptsByIds(ids: string[]): Promise<ExcerptRow[]> {
+    if (ids.length === 0) return [];
+    const r = await pool.query<ExcerptRow>(
+      `SELECT id,doc_id,quote,anchor_idx,start_id,end_id,status,last_content,deleted,author,created_at
+       FROM excerpts WHERE id = ANY($1)`,
+      [ids],
+    );
+    return r.rows;
+  },
+  /** Every excerpt row (incl. soft-deleted) — dependency graph rebuild on boot. */
+  async listAllExcerpts(): Promise<ExcerptRow[]> {
+    const r = await pool.query<ExcerptRow>(
+      'SELECT id,doc_id,quote,anchor_idx,start_id,end_id,status,last_content,deleted,author,created_at FROM excerpts',
+    );
+    return r.rows;
+  },
+  async updateExcerptAnchor(
+    id: string,
+    anchorIdx: number,
+    status: 'anchored' | 'lost',
+    lastContent: string,
+    startId: Id | null,
+    endId: Id | null,
+  ): Promise<void> {
+    await pool.query(
+      'UPDATE excerpts SET anchor_idx=$2,status=$3,last_content=$4,start_id=$5,end_id=$6 WHERE id=$1',
+      [
+        id,
+        anchorIdx,
+        status,
+        lastContent,
+        startId ? JSON.stringify(startId) : null,
+        endId ? JSON.stringify(endId) : null,
+      ],
+    );
+  },
+  async softDeleteExcerpt(id: string): Promise<void> {
+    await pool.query('UPDATE excerpts SET deleted=TRUE WHERE id=$1', [id]);
+  },
+
+  /**
+   * Replace a document's outgoing reference edges with exactly the excerpts its
+   * body currently references. Single statement, so concurrent reconciles of
+   * the same document never interleave into a half-written edge set.
+   */
+  async reconcileEdges(docId: string, excerptIds: string[]): Promise<void> {
+    await pool.query(
+      `WITH del AS (
+         DELETE FROM ref_edges WHERE doc_id=$1 AND NOT (excerpt_id = ANY($2::text[]))
+       )
+       INSERT INTO ref_edges(doc_id, excerpt_id)
+       SELECT $1, e FROM unnest($2::text[]) AS e
+       ON CONFLICT (doc_id, excerpt_id) DO NOTHING`,
+      [docId, excerptIds],
+    );
+  },
+  async listEdgesForDoc(docId: string): Promise<RefEdgeRow[]> {
+    const r = await pool.query<RefEdgeRow>(
+      'SELECT doc_id,excerpt_id FROM ref_edges WHERE doc_id=$1',
+      [docId],
+    );
+    return r.rows;
+  },
+  async listEdgesReferencing(excerptIds: string[]): Promise<RefEdgeRow[]> {
+    if (excerptIds.length === 0) return [];
+    const r = await pool.query<RefEdgeRow>(
+      'SELECT doc_id,excerpt_id FROM ref_edges WHERE excerpt_id = ANY($1)',
+      [excerptIds],
+    );
+    return r.rows;
+  },
+  /** Every edge, for rebuilding the in-memory dependency graph on boot. */
+  async listAllEdges(): Promise<RefEdgeRow[]> {
+    const r = await pool.query<RefEdgeRow>('SELECT doc_id,excerpt_id FROM ref_edges');
+    return r.rows;
+  },
+  /** Excerpt ids referenced by a document, joined with their source doc ids. */
+  async listReferencedExcerpts(docId: string): Promise<ExcerptRow[]> {
+    const r = await pool.query<ExcerptRow>(
+      `SELECT e.id,e.doc_id,e.quote,e.anchor_idx,e.start_id,e.end_id,e.status,e.last_content,e.deleted,e.author,e.created_at
+       FROM ref_edges re JOIN excerpts e ON e.id=re.excerpt_id
+       WHERE re.doc_id=$1`,
+      [docId],
+    );
+    return r.rows;
   },
 };

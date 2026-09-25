@@ -61,6 +61,30 @@ export interface DiffRow {
   newParts?: { type: 'equal' | 'insert' | 'delete'; value: string[] }[];
 }
 
+/** A passage registered in a source document as referenceable. */
+export interface Excerpt {
+  id: string;
+  doc_id: string;
+  quote: string;
+  index: number;
+  end: number;
+  status: 'anchored' | 'invalid';
+  content: string;
+  author: string;
+  created_at: number;
+}
+
+/** A live reference as resolved for the current viewer (wire shape). */
+export interface RefState {
+  excerptId: string;
+  sourceDocId: string;
+  sourceTitle: string;
+  status: 'anchored' | 'invalid';
+  /** Empty unless the viewer may read the source document. */
+  content: string;
+  allowed: boolean;
+}
+
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
@@ -142,4 +166,20 @@ export const api = {
     req<{ text: string }>(`/api/documents/${id}/versions/${v}/text`),
   rollback: (id: string, versionId: string) =>
     req(`/api/documents/${id}/rollback`, { method: 'POST', body: JSON.stringify({ versionId }) }),
+
+  // ---- live cross-document references ----
+  registerExcerpt: (docId: string, quote: string, index: number) =>
+    req<{ excerpt: Excerpt }>(`/api/documents/${docId}/excerpts`, {
+      method: 'POST',
+      body: JSON.stringify({ quote, index }),
+    }),
+  excerpts: (docId: string) => req<{ excerpts: Excerpt[] }>(`/api/documents/${docId}/excerpts`),
+  unregisterExcerpt: (excerptId: string) =>
+    req(`/api/excerpts/${excerptId}`, { method: 'DELETE' }),
+  insertReference: (docId: string, excerptId: string, index?: number) =>
+    req(`/api/documents/${docId}/references`, {
+      method: 'POST',
+      body: JSON.stringify({ excerptId, index }),
+    }),
+  references: (docId: string) => req<{ refs: RefState[] }>(`/api/documents/${docId}/references`),
 };

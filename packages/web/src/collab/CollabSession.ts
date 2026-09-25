@@ -1,4 +1,5 @@
 import { CrdtDoc, type Op } from '@collabmd/core';
+import type { RefState } from '../api/client';
 
 export interface RemotePresence {
   userId: string;
@@ -45,6 +46,8 @@ export class CollabSession {
   presence: RemotePresence[] = [];
   you: SessionYou | null = null;
   anchors: AnchorState[] = [];
+  /** Live references reachable from this document, keyed by excerpt id. */
+  refs: Record<string, RefState> = {};
   connected = false;
   error: string | null = null;
 
@@ -108,6 +111,13 @@ export class CollabSession {
         this.emit();
       } else if (msg.t === 'anchors') {
         this.anchors = msg.comments;
+        this.emit();
+      } else if (msg.t === 'refs') {
+        // Server pushes a fresh, permission-filtered snapshot whenever a
+        // referenced excerpt (or this document's edge set) changes.
+        const next: Record<string, RefState> = {};
+        for (const r of msg.refs as RefState[]) next[r.excerptId] = r;
+        this.refs = next;
         this.emit();
       } else if (msg.t === 'error') {
         this.error = msg.message;

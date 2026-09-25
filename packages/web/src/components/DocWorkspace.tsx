@@ -6,6 +6,7 @@ import { Preview } from './Preview';
 import { CommentPanel } from './CommentPanel';
 import { VersionHistory } from './VersionHistory';
 import { MembersModal } from './MembersModal';
+import { ReferencePicker } from './ReferencePicker';
 import { roleCan, type Role } from '../collab/roles';
 
 interface Props {
@@ -24,9 +25,12 @@ export function DocWorkspace({ doc, user, onDeleted, onError }: Props) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [role, setRole] = useState<Role>(doc.role);
   const [pendingQuote, setPendingQuote] = useState<{ quote: string; index: number } | null>(null);
+  const [selection, setSelection] = useState<{ quote: string; index: number } | null>(null);
   const [showVersions, setShowVersions] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
+  const [showRefPicker, setShowRefPicker] = useState(false);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
+  const cursorRef = useRef(0);
 
   useEffect(() => {
     const session = sessionRef.current!;
@@ -80,6 +84,29 @@ export function DocWorkspace({ doc, user, onDeleted, onError }: Props) {
     }
   };
 
+  /** Register the current selection as a referenceable excerpt of this doc. */
+  const registerSelection = async (): Promise<void> => {
+    if (!selection) return;
+    try {
+      await api.registerExcerpt(doc.id, selection.quote, selection.index);
+      onError(`已登记 ${selection.quote.length} 字为可引用片段`);
+      setSelection(null);
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
+  /** Insert a reference block to an excerpt at the last cursor position. */
+  const insertReference = async (excerptId: string): Promise<void> => {
+    try {
+      await api.insertReference(doc.id, excerptId, cursorRef.current);
+      setShowRefPicker(false);
+      onError('已插入引用块');
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+
   return (
     <div className="workspace">
       <div className="topbar">
@@ -111,6 +138,18 @@ export function DocWorkspace({ doc, user, onDeleted, onError }: Props) {
         <div className="editor-pane">
           <div className="pane-head">
             Markdown 源码{canEdit ? '' : '（当前角色只读）'}
+            {canEdit && (
+              <span className="pane-actions">
+                {selection && (
+                  <button className="mini" onClick={registerSelection}>
+                    登记为引用片段（{selection.quote.length} 字）
+                  </button>
+                )}
+                <button className="mini" onClick={() => setShowRefPicker(true)}>
+                  插入引用
+                </button>
+              </span>
+            )}
           </div>
           {hydrated ? (
             <Editor
@@ -120,7 +159,11 @@ export function DocWorkspace({ doc, user, onDeleted, onError }: Props) {
               canEdit={canEdit}
               previewScrollRef={previewScrollRef}
               onSelect={(quote, index) => {
+                setSelection({ quote, index });
                 if (canComment) setPendingQuote({ quote, index });
+              }}
+              onCursor={(i) => {
+                cursorRef.current = i;
               }}
             />
           ) : (
@@ -132,6 +175,7 @@ export function DocWorkspace({ doc, user, onDeleted, onError }: Props) {
           {hydrated ? (
             <Preview
               text={text}
+              refs={session.refs}
               scrollRef={(el) => {
                 previewScrollRef.current = el;
               }}
@@ -164,6 +208,14 @@ export function DocWorkspace({ doc, user, onDeleted, onError }: Props) {
       )}
       {showMembers && (
         <MembersModal docId={doc.id} onClose={() => setShowMembers(false)} onError={onError} />
+      )}
+      {showRefPicker && (
+        <ReferencePicker
+          currentDocId={doc.id}
+          onPick={insertReference}
+          onClose={() => setShowRefPicker(false)}
+          onError={onError}
+        />
       )}
     </div>
   );

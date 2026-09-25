@@ -26,6 +26,10 @@ vi.mock('../src/repo.js', () => ({
     insertVersion: vi.fn(async (v: any) => {
       state.versions.push(v);
     }),
+    // reference layer persistence (unused by these tests)
+    listAllEdges: vi.fn(async () => []),
+    listAllExcerpts: vi.fn(async () => []),
+    listExcerptsByIds: vi.fn(async () => []),
   },
 }));
 

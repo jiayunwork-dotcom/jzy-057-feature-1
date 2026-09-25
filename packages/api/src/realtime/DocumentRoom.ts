@@ -1,6 +1,7 @@
 import { CrdtDoc, resolveAnchor, type Op } from '@collabmd/core';
 import { repo, type CommentRow } from '../repo.js';
 import { config } from '../config.js';
+import { referenceCoordinator } from './ReferenceCoordinator.js';
 
 type Listener = (event: RoomEvent) => void;
 
@@ -155,7 +156,12 @@ export async function getRoom(docId: string): Promise<DocumentRoom> {
   if (existing) return existing;
   const loading = DocumentRoom.load(docId);
   rooms.set(docId, loading);
-  return loading;
+  const room = await loading;
+  // Attach the cross-document reference layer to every room, however it was
+  // loaded (websocket join or REST), so reference sync never depends on the
+  // entry point.
+  referenceCoordinator.attach(room);
+  return room;
 }
 
 /** Persist an auto checkpoint at the current op log offset. */
